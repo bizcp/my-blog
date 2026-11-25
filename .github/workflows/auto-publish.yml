@@ -1,0 +1,49 @@
+name: Hourly AI Post Generation
+
+# Vercel Hobby 플랜은 cron을 하루 1회만 허용하므로,
+# 더 자주 발행하려면 GitHub Actions (무료, 매시간 가능) 으로 endpoint를 호출합니다.
+#
+# 호출 대상: /api/cron/generate-post
+#   → DB의 키워드 중 가장 적게 사용된 1개를 골라 Gemini로 글 생성·발행
+#
+# 필수 GitHub Secrets:
+#   - SITE_URL: 배포된 사이트 URL (예: https://your-blog.vercel.app)
+#   - CRON_SECRET: 라우트 인증용 Bearer 토큰 (Vercel env에도 동일하게 등록)
+
+on:
+  schedule:
+    # UTC 기준 매시간 (한국 시간은 +9). KST 9~21시 발행을 원하면 UTC 0-12시
+    - cron: '0 0-12 * * *'
+  workflow_dispatch: # 수동 실행도 허용
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger AI generation endpoint
+        run: |
+          # 시크릿이 등록되지 않았으면 친절히 안내하고 종료 (curl URL malformed / exit 3 방지)
+          if [ -z "${{ secrets.SITE_URL }}" ] || [ -z "${{ secrets.CRON_SECRET }}" ]; then
+            echo "❌ GitHub Secret이 등록되지 않았습니다."
+            echo "   다음 2개를 등록하세요: Settings → Secrets and variables → Actions"
+            echo "   - SITE_URL    : 배포된 Vercel URL (예: https://coleitai-blog.vercel.app, 끝에 / 없이)"
+            echo "   - CRON_SECRET : 라우트 인증용 Bearer 토큰 (Vercel 환경변수 CRON_SECRET 값과 동일)"
+            exit 1
+          fi
+          # -L: SITE_URL이 redirect 도메인이어도 따라가서 호출 (308 무한대기 방지)
+          response=$(curl -sL -o /tmp/body.json -w "%{http_code}" -X POST \
+            "${{ secrets.SITE_URL }}/api/cron/generate-post" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json")
+          echo "HTTP status: $response"
+          cat /tmp/body.json || true
+          echo ""
+          # 2xx 이외는 모두 실패로 처리 (308/401/404 등이 success로 통과되던 문제 차단)
+          if [ "$response" -lt 200 ] || [ "$response" -ge 300 ]; then
+            echo "❌ Post generation failed (HTTP $response). 보통 원인:"
+            echo "   - SITE_URL secret이 실제 Vercel 배포 URL과 다름 (308)"
+            echo "   - CRON_SECRET 불일치 (401)"
+            echo "   - /admin/keywords에 등록된 키워드 없음 (400)"
+            exit 1
+          fi
+          echo "✅ Post generation succeeded"
